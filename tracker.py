@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+"""
+AI Model & Leak Tracker v2.1
+OpenRouter (all modalities) + Models.dev + LiteLLM + HuggingFace +
+GitHub Commit/PR Diff Patch + GitHub Org New Repo Radar
+"""
 import json
 import os
 import re
@@ -12,7 +17,7 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
-HEADERS_BASE = {"User-Agent": "AI-Model-Leak-Tracker/2.0"}
+HEADERS_BASE = {"User-Agent": "AI-Model-Leak-Tracker/2.1"}
 
 HF_ORGS = [
     "deepseek-ai",
@@ -27,6 +32,20 @@ HF_ORGS = [
     "nvidia",
     "ByteDance-Seed",
     "stepfun-ai",
+]
+
+GITHUB_ORGS = [
+    "deepseek-ai",
+    "QwenLM",
+    "zai-org",
+    "MoonshotAI",
+    "MiniMax-AI",
+    "xai-org",
+    "mistralai",
+    "openai",
+    "anthropics",
+    "google-gemini",
+    "meta-llama",
 ]
 
 GITHUB_REPOS = [
@@ -55,13 +74,13 @@ MODEL_REGEX = re.compile(
         claude-(?:opus|sonnet|haiku|[3456])[a-z0-9._-]* |
         gemini-[2-9][a-z0-9._-]* |
         deepseek-(?:v[3-9]|r[1-9])[a-z0-9._-]* |
-        qwen-?[3-9][a-z0-9._-]* |
+        qwen-?(?:[3-9]|image|omni|vl|coder)[a-z0-9._-]* |
         llama-?[4-9][a-z0-9._-]* |
         glm-?[4-9][a-z0-9._-]* |
         grok-?[3-9][a-z0-9._-]* |
         kimi-k[2-9][a-z0-9._-]* |
         minimax-m[2-9][a-z0-9._-]* |
-        (?:mistral|devstral|magistral)-[2-9][a-z0-9._-]*
+        (?:mistral|devstral|magistral|voxtral)-[a-z0-9._-]*[2-9][a-z0-9._-]*
     )\b""",
     re.VERBOSE,
 )
@@ -131,6 +150,23 @@ def clean_model_token(token):
     if len(tok) < 4 or any(w in tok for w in NOISE_WORDS):
         return None
     return tok
+
+
+def extract_new_models_from_files(files_list, known_set):
+    found = {}
+    for f in files_list:
+        patch = f.get("patch", "")
+        if not patch:
+            continue
+        fname = f.get("filename", "")
+        for line in patch.splitlines():
+            if not line.startswith("+") or line.startswith("+++"):
+                continue
+            for raw_tok in MODEL_REGEX.findall(line):
+                tok = clean_model_token(raw_tok)
+                if tok and tok not in known_set:
+                    found.setdefault(tok, (fname, line[1:].strip()[:120]))
+    return found
 
 
 def check_openrouter(state, known_set, alerts):
@@ -247,7 +283,7 @@ def check_huggingface(state, alerts):
 
 def check_github(state, known_set, alerts):
     if not GITHUB_TOKEN:
-        return
+        return False
     gh_headers = {
         "Accept": "application/vnd.github+json",
         "Authorization": f"Bearer {GITHUB_TOKEN}",
@@ -270,19 +306,7 @@ def check_github(state, known_set, alerts):
                 detail = http_get_json(f"https://api.github.com/repos/{repo}/commits/{sha}", gh_headers)
                 msg = detail.get("commit", {}).get("message", "").splitlines()[0]
                 html_url = detail.get("html_url", "")
-                found = {}
-                for f in detail.get("files", []):
-                    patch = f.get("patch", "")
-                    if not patch:
-                        continue
-                    fname = f.get("filename", "")
-                    for line in patch.splitlines():
-                        if not line.startswith("+") or line.startswith("+++"):
-                            continue
-                        for raw_tok in MODEL_REGEX.findall(line):
-                            tok = clean_model_token(raw_tok)
-                            if tok and tok not in known_set:
-                                found.setdefault(tok, (fname, line[1:].strip()[:120]))
+                found = extract_new_models_from_files(detail.get("files", []), known_set)
 
                 if found:
                     for tok in found:
@@ -305,7 +329,8 @@ def check_github(state, known_set, alerts):
                 gh_headers,
             )
             for pr in prs:
-                pr_id = f"{repo}#{pr.get('number')}"
+                num = pr.get("number")
+                pr_id = f"{repo}#{num}"
                 if pr_id in seen_prs:
                     continue
                 state["seen_prs"].append(pr_id)
@@ -315,20 +340,73 @@ def check_github(state, known_set, alerts):
 
                 title = pr.get("title", "")
                 text_blob = f"{title}\n{pr.get('body') or ''}"
-                new_hits = []
+                text_hits = []
                 for raw_tok in MODEL_REGEX.findall(text_blob):
                     tok = clean_model_token(raw_tok)
                     if tok and tok not in known_set:
-                        new_hits.append(tok)
-                        known_set.add(tok)
-                if new_hits or any(k in title.lower() for k in ("stealth", "unreleased", "alpha model")):
+                        text_hits.append(tok)
+
+                file_found = {}
+                try:
+                    pr_files = http_get_json(
+                        f"https://api.github.com/repos/{repo}/pulls/{num}/files?per_page=15",
+                        gh_headers,
+                    )
+                    file_found = extract_new_models_from_files(pr_files, known_set)
+                except Exception as fe:
+                    print(f"[WARN] GH PR files {pr_id}: {fe}")
+
+                for tok in text_hits:
+                    known_set.add(tok)
+                for tok in file_found:
+                    known_set.add(tok)
+
+                has_kw = any(k in title.lower() for k in ("stealth", "unreleased", "alpha model"))
+                if text_hits or file_found or has_kw:
+                    details = []
+                    if text_hits:
+                        details.append("Metin: " + ", ".join(dict.fromkeys(text_hits))[:120])
+                    for tok, (fn, ln) in list(file_found.items())[:4]:
+                        details.append(f"• {tok} ({fn}): {ln}")
+                    if not details and has_kw:
+                        details.append("Anahtar kelime eslesmesi")
                     alerts.append((
                         f"👀 Acik PR Sinyali: {pr_id}",
-                        f"Baslik: {title}\nEslesen: {', '.join(new_hits[:5]) or 'Anahtar kelime'}",
+                        f"Baslik: {title}\n" + "\n".join(details),
                         pr.get("html_url", ""),
                     ))
+            time.sleep(0.1)
         except Exception as e:
             print(f"[WARN] GH PRs {repo}: {e}")
+
+    is_org_baseline = "seen_org_repos" not in state
+    seen_org_repos = set(state.get("seen_org_repos", []))
+    current_org_repos = set(seen_org_repos)
+
+    for org in GITHUB_ORGS:
+        try:
+            repos = http_get_json(
+                f"https://api.github.com/orgs/{org}/repos?type=public&sort=created&direction=desc&per_page=5",
+                gh_headers,
+            )
+            for r in repos:
+                full_name = r.get("full_name", "")
+                if not full_name:
+                    continue
+                current_org_repos.add(full_name)
+                if full_name not in seen_org_repos and state["initialized"] and not is_org_baseline:
+                    desc = (r.get("description") or "Aciklama yok")[:180]
+                    alerts.append((
+                        f"🏛️ Yeni Lab GitHub Reposu: {full_name}",
+                        f"Org: {org}\n{desc}",
+                        r.get("html_url", f"https://github.com/{full_name}"),
+                    ))
+            time.sleep(0.1)
+        except Exception as e:
+            print(f"[WARN] GH org {org}: {e}")
+
+    state["seen_org_repos"] = sorted(current_org_repos)
+    return is_org_baseline
 
 
 def main():
@@ -340,7 +418,7 @@ def main():
     check_models_dev(state, known_set, alerts)
     check_litellm_json(state, known_set, alerts)
     check_huggingface(state, alerts)
-    check_github(state, known_set, alerts)
+    is_org_baseline = check_github(state, known_set, alerts)
 
     state["known_model_strings"] = sorted(known_set)
 
@@ -351,13 +429,20 @@ def main():
             f"Takip baslatildi ({datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}).\n"
             f"• Kayitli model izi: {len(known_set)}\n"
             f"• Izlenen HF lab: {len(HF_ORGS)}\n"
-            f"• Izlenen GitHub repo: {len(GITHUB_REPOS)}\n"
-            f"• Tarama sikligi: Her 15 dk (7/24 Bulut)"
+            f"• Izlenen GH org/repo: {len(GITHUB_ORGS)} org / {len(GITHUB_REPOS)} repo"
         )
         notify("✅ AI Model Tracker Aktif", summary)
         return
 
     save_state(state)
+    if is_org_baseline:
+        notify(
+            "🚀 Tracker v2.1 Guncellendi",
+            f"PR kod farki (/files) ve {len(GITHUB_ORGS)} lab GitHub yeni repo radari eklendi.\n"
+            f"• Kayitli model izi: {len(known_set)}\n"
+            f"• Kayitli org repo baz hatti: {len(state.get('seen_org_repos', []))}",
+        )
+
     for title, msg, url in alerts:
         notify(title, msg, url)
         time.sleep(0.5)
