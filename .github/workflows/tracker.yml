@@ -1,0 +1,49 @@
+name: AI Model & Leak Tracker
+
+on:
+  schedule:
+    # Sunucu yogunluguna takilmamak icin tekil dakikalarda 15 dk aralikla calisir
+    - cron: "7,22,37,52 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ai-model-tracker
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  track:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run tracker
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python3 tracker.py
+
+      - name: Save state or keep alive
+        run: |
+          git config user.name "tracker-bot"
+          git config user.email "actions@users.noreply.github.com"
+          if [ -n "$(git status --porcelain state.json)" ]; then
+            git add state.json
+            git commit -m "chore: update tracker state"
+            git pull --rebase origin main || true
+            git push
+          else
+            LAST_TS=$(git log -1 --format=%ct)
+            NOW_TS=$(date +%s)
+            DIFF=$((NOW_TS - LAST_TS))
+            if [ "$DIFF" -gt 2160000 ]; then
+              date -u +"%Y-%m-%dT%H:%M:%SZ" > .heartbeat
+              git add .heartbeat
+              git commit -m "chore: keep workflow alive"
+              git pull --rebase origin main || true
+              git push
+            fi
+          fi
