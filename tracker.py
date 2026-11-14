@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AI Model & Leak Tracker v3.0
+AI Model & Leak Tracker v3.1
 OpenRouter (all modalities) + Vercel AI Gateway + Models.dev + LiteLLM +
 NVIDIA Catalog + HuggingFace + GitHub Commit/PR Diff + Path-Targeted Cloud SDKs +
 GitHub Org New Repos + Vertex/OpenAI/DeepMind/Anthropic News + NPM CLIs
@@ -20,7 +20,7 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
-HEADERS_BASE = {"User-Agent": "AI-Model-Leak-Tracker/3.0"}
+HEADERS_BASE = {"User-Agent": "AI-Model-Leak-Tracker/3.1"}
 
 HF_ORGS = [
     "deepseek-ai",
@@ -70,7 +70,6 @@ GITHUB_REPOS = [
     "ollama/ollama",
 ]
 
-# Dev monorepolarda sadece AI/SDK yollarini izleyen keskin nisanci listesi: (repo, path)
 GITHUB_PATH_TARGETS = [
     ("Azure/azure-rest-api-specs", "specification/ai"),
     ("Azure/azure-sdk-for-python", "sdk/ai"),
@@ -100,7 +99,7 @@ XML_FEEDS = [
 ]
 
 MODEL_REGEX = re.compile(
-    r'''(?i)\b(
+    r"""(?i)\b(
         gpt-(?:[5-9](?![0-9])|image|oss|audio|realtime)[a-z0-9._-]* |
         o[3-9](?![0-9])(?:-[a-z0-9._-]+)? |
         claude-(?:opus|sonnet|haiku|mythos|fable|[456](?![0-9]))[a-z0-9._-]* |
@@ -112,13 +111,23 @@ MODEL_REGEX = re.compile(
         grok-?[3-9](?![0-9])[a-z0-9._-]* |
         kimi-k[3-9](?![0-9])[a-z0-9._-]* |
         minimax-m[3-9](?![0-9])[a-z0-9._-]* |
-        (?:mistral|devstral|magistral|voxtral)-[a-z0-9._-]*[2-9](?![0-9])[a-z0-9._-]*
-    )\b''',
+        (?:mistral-(?:large|medium|small)|devstral|magistral|voxtral)-[a-z0-9._-]*[2-9](?![0-9])[a-z0-9._-]*
+    )\b""",
     re.VERBOSE,
 )
 
 NOISE_WORDS = ("test", "mock", "fake", "dummy", "example", "sample", "invalid", "deprecated")
 EXT_STRIP_RE = re.compile(r"\.(toml|ya?ml|json|py|ts|js|md)$", re.IGNORECASE)
+BEDROCK_SUFFIX_RE = re.compile(r"(?:(?<=\d)-v?[012]|(?<=\db)-\d)$")
+IGNORED_FILE_SUFFIXES = (
+    ".lycheeignore",
+    ".gitignore",
+    ".lock",
+    "-lock.json",
+    "-lock.yaml",
+    ".svg",
+    ".png",
+)
 
 
 def http_get(url, extra_headers=None, timeout=25):
@@ -203,6 +212,28 @@ def send_grouped(header, items, footer=""):
     send_telegram("\n\n".join(chunk))
 
 
+def add_known_aliases(known_set, raw_id):
+    s = raw_id.lower().strip()
+    if len(s) < 4:
+        return
+    known_set.add(s)
+    tail = s.split("/")[-1]
+    no_colon = re.sub(r":\d+$", "", tail)
+    no_region = re.sub(r"^(?:us|eu|apac|global)\.", "", no_colon)
+    no_vendor = re.sub(r"^(?:anthropic|openai|mistral|amazon|meta|deepseek|cohere)\.", "", no_region)
+    no_bedrock_ver = BEDROCK_SUFFIX_RE.sub("", no_vendor)
+    for alias in (tail, no_colon, no_region, no_vendor, no_bedrock_ver):
+        if len(alias) >= 4:
+            known_set.add(alias)
+
+
+def is_known_token(tok, known_set):
+    if tok in known_set:
+        return True
+    stripped = BEDROCK_SUFFIX_RE.sub("", tok)
+    return stripped in known_set
+
+
 def clean_model_token(token):
     tok = EXT_STRIP_RE.sub("", token.strip()).strip("._-").lower()
     if len(tok) < 4 or any(w in tok for w in NOISE_WORDS):
@@ -219,14 +250,14 @@ def extract_new_models_from_files(files_list, known_set):
         if not patch:
             continue
         fname = f.get("filename", "")
-        if fname.endswith((".lycheeignore", ".gitignore", ".lock", "-lock.json", "-lock.yaml", ".svg", ".png")):
+        if fname.endswith(IGNORED_FILE_SUFFIXES):
             continue
         for line in patch.splitlines():
             if not line.startswith("+") or line.startswith("+++"):
                 continue
             for raw_tok in MODEL_REGEX.findall(line):
                 tok = clean_model_token(raw_tok)
-                if tok and tok not in known_set:
+                if tok and not is_known_token(tok, known_set):
                     found.setdefault(tok, (fname, line[1:].strip()[:110]))
     return found
 
@@ -243,8 +274,7 @@ def check_openrouter(state, known_set, groups):
             if not mid:
                 continue
             current.append(mid)
-            known_set.add(mid.lower())
-            known_set.add(mid.split("/")[-1].lower())
+            add_known_aliases(known_set, mid)
             if mid not in seen and state["initialized"]:
                 ctx = m.get("context_length", "?")
                 mods = ", ".join(m.get("architecture", {}).get("output_modalities", []) or ["text"])
@@ -277,8 +307,7 @@ def check_vercel_gateway(state, known_set, groups):
             if not mid:
                 continue
             current.append(mid)
-            known_set.add(mid.lower())
-            known_set.add(mid.split("/")[-1].lower())
+            add_known_aliases(known_set, mid)
             if mid not in seen and state["initialized"] and not is_baseline:
                 mtype = m.get("type", "language")
                 name = m.get("name", mid)
@@ -312,8 +341,7 @@ def check_nvidia_catalog(state, known_set, groups):
             if not mid:
                 continue
             current.append(mid)
-            known_set.add(mid.lower())
-            known_set.add(mid.split("/")[-1].lower())
+            add_known_aliases(known_set, mid)
             if mid not in seen and state["initialized"] and not is_baseline:
                 dname = item.get("name", mid)
                 hits.append(f"• {mid} ({dname})")
@@ -341,8 +369,7 @@ def check_models_dev(state, known_set, groups):
             for mid, minfo in models.items():
                 full_id = f"{prov_id}/{mid}"
                 current.append(full_id)
-                known_set.add(mid.lower())
-                known_set.add(full_id.lower())
+                add_known_aliases(known_set, full_id)
                 if full_id not in seen and state["initialized"]:
                     ctx = minfo.get("limit", {}).get("context", "?") if isinstance(minfo, dict) else "?"
                     hits.append(f"• {full_id} (Ctx: {ctx})")
@@ -364,8 +391,7 @@ def check_litellm_json(state, known_set, groups):
             if k == "sample_spec":
                 continue
             current.append(k)
-            known_set.add(k.lower())
-            known_set.add(k.split("/")[-1].lower())
+            add_known_aliases(known_set, k)
             if k not in seen and state["initialized"]:
                 prov = info.get("litellm_provider", "?") if isinstance(info, dict) else "?"
                 max_tok = (info.get("max_input_tokens") or info.get("max_tokens", "?")) if isinstance(info, dict) else "?"
@@ -454,6 +480,8 @@ def check_official_news(state, groups):
                 if not key:
                     continue
                 current.add(key)
+                if "/customer-stories/" in link:
+                    continue
                 if key not in seen and state["initialized"] and not is_baseline:
                     hits.append(f"• [{label}] {title or 'Yeni guncelleme'}\n{link}")
         except Exception as e:
@@ -540,7 +568,7 @@ def check_github(state, known_set, groups):
                 text_hits = []
                 for raw_tok in MODEL_REGEX.findall(text_blob):
                     tok = clean_model_token(raw_tok)
-                    if tok and tok not in known_set:
+                    if tok and not is_known_token(tok, known_set):
                         text_hits.append(tok)
 
                 file_found = {}
@@ -600,7 +628,7 @@ def check_github(state, known_set, groups):
                 msg_hits = []
                 for raw_tok in MODEL_REGEX.findall(msg):
                     tok = clean_model_token(raw_tok)
-                    if tok and tok not in known_set:
+                    if tok and not is_known_token(tok, known_set):
                         msg_hits.append(tok)
                 file_found = extract_new_models_from_files(detail.get("files", []), known_set)
 
@@ -661,6 +689,8 @@ def check_github(state, known_set, groups):
 def main():
     state = load_state()
     known_set = set(state.get("known_model_strings", []))
+    for existing in list(known_set):
+        add_known_aliases(known_set, existing)
     groups = []
 
     check_openrouter(state, known_set, groups)
@@ -679,25 +709,15 @@ def main():
         state["initialized"] = True
         save_state(state)
         send_telegram(
-            f"✅ AI Model Tracker v3.0 Aktif ({datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')})\n"
-            f"• Kayitli model izi: {len(known_set)}\n"
-            f"• Izlenen kaynak: OpenRouter, Vercel Gateway, NVIDIA, Models.dev, LiteLLM, "
-            f"{len(HF_ORGS)} HF lab, {len(GITHUB_REPOS)} repo, {len(GITHUB_PATH_TARGETS)} SDK yolu, "
-            f"{len(GITHUB_ORGS)} org, NPM & Resmi Bloglar"
+            f"✅ AI Model Tracker v3.1 Aktif ({datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')})\n"
+            f"• Kayitli model izi: {len(known_set)}"
         )
         return
 
     save_state(state)
 
     if any([b_vercel, b_nvidia, b_npm, b_news, b_path, b_org]):
-        send_telegram(
-            "🚀 Tracker v3.0 Yukseltildi!\n"
-            "Yeni eklenen baz hatlar sessizce kaydedildi:\n"
-            "• Vercel AI Gateway & NVIDIA API Katalog\n"
-            "• Azure AI / AWS Bedrock / OpenAI OpenAPI / Tiktoken / GenAI-Prices / Pi / System Prompts Leaks\n"
-            "• Vertex AI, OpenAI, DeepMind, Anthropic Sitemap & NPM CLI surum radari\n"
-            "• Gruplu bildirim & eski-nesil test gurultusu filtresi aktif!"
-        )
+        send_telegram("🚀 Tracker v3.1 Yukseltildi!")
 
     for header, items, footer in groups:
         send_grouped(header, items, footer)
