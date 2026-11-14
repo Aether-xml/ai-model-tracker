@@ -100,20 +100,20 @@ XML_FEEDS = [
 ]
 
 MODEL_REGEX = re.compile(
-    r"""(?i)\b(
-        gpt-(?:[5-9]|image|oss|audio|realtime)[a-z0-9._-]* |
-        o[3-9](?:-[a-z0-9._-]+)? |
-        claude-(?:opus|sonnet|haiku|mythos|fable|[456])[a-z0-9._-]* |
-        gemini-[3-9][a-z0-9._-]* |
-        deepseek-(?:v[4-9]|r[2-9])[a-z0-9._-]* |
-        qwen-?(?:3\.[5-9]|3[5-9]|[4-9]|4exp|image|omni)[a-z0-9._-]* |
-        llama-?[4-9][a-z0-9._-]* |
-        glm-?[5-9][a-z0-9._-]* |
-        grok-?[3-9][a-z0-9._-]* |
-        kimi-k[3-9][a-z0-9._-]* |
-        minimax-m[3-9][a-z0-9._-]* |
-        (?:mistral|devstral|magistral|voxtral)-[a-z0-9._-]*[2-9][a-z0-9._-]*
-    )\b""",
+    r'''(?i)\b(
+        gpt-(?:[5-9](?![0-9])|image|oss|audio|realtime)[a-z0-9._-]* |
+        o[3-9](?![0-9])(?:-[a-z0-9._-]+)? |
+        claude-(?:opus|sonnet|haiku|mythos|fable|[456](?![0-9]))[a-z0-9._-]* |
+        gemini-[3-9](?![0-9])[a-z0-9._-]* |
+        deepseek-(?:v[4-9](?![0-9])|r[2-9](?![0-9]))[a-z0-9._-]* |
+        qwen-?(?:3\.[5-9]|3[5-9]|[4-9](?![0-9])|4exp|image|omni)[a-z0-9._-]* |
+        llama-?[4-9](?![0-9])[a-z0-9._-]* |
+        glm-?[5-9](?![0-9])[a-z0-9._-]* |
+        grok-?[3-9](?![0-9])[a-z0-9._-]* |
+        kimi-k[3-9](?![0-9])[a-z0-9._-]* |
+        minimax-m[3-9](?![0-9])[a-z0-9._-]* |
+        (?:mistral|devstral|magistral|voxtral)-[a-z0-9._-]*[2-9](?![0-9])[a-z0-9._-]*
+    )\b''',
     re.VERBOSE,
 )
 
@@ -219,6 +219,8 @@ def extract_new_models_from_files(files_list, known_set):
         if not patch:
             continue
         fname = f.get("filename", "")
+        if fname.endswith((".lycheeignore", ".gitignore", ".lock", "-lock.json", "-lock.yaml", ".svg", ".png")):
+            continue
         for line in patch.splitlines():
             if not line.startswith("+") or line.startswith("+++"):
                 continue
