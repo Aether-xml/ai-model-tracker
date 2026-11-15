@@ -17364,7 +17364,8 @@
     "vllm-project/vllm#67777",
     "vllm-project/vllm#67776",
     "vllm-project/vllm#67775",
-    "ollama/ollama#19706"
+    "ollama/ollama#19706",
+    "google-gemini/gemini-cli#30307"
   ],
   "known_model_strings": [
     "1.3b",
@@ -41048,5 +41049,7 @@
     "4386db9a9a44fef1c054cdc5d77825fd900ae10c",
     "7689e1b2d1541c8d77f50039bf8273fb092e905d",
     "90ebfa3b4f496d3119521e0f829b7e18e2e1107c"
-  ]
+  ],
+  "recent_alerts": [],
+  "live_index_ready": true
 }
