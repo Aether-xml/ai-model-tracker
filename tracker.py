@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-AI Model & Leak Tracker v3.1
-OpenRouter (all modalities) + Vercel AI Gateway + Models.dev + LiteLLM +
+AI Model & Leak Tracker v3.2
+OpenRouter (all modalities) + Vercel AI Gateway + Models.dev (deduped) + LiteLLM (deduped) +
 NVIDIA Catalog + HuggingFace + GitHub Commit/PR Diff + Path-Targeted Cloud SDKs +
 GitHub Org New Repos + Vertex/OpenAI/DeepMind/Anthropic News + NPM CLIs
 """
@@ -20,7 +20,7 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
-HEADERS_BASE = {"User-Agent": "AI-Model-Leak-Tracker/3.1"}
+HEADERS_BASE = {"User-Agent": "AI-Model-Leak-Tracker/3.2"}
 
 HF_ORGS = [
     "deepseek-ai",
@@ -97,6 +97,38 @@ XML_FEEDS = [
     ("OpenAI News", "https://openai.com/news/rss.xml"),
     ("DeepMind Blog", "https://deepmind.google/blog/rss.xml"),
 ]
+
+FIRST_PARTY_PROVIDERS = {
+    "openai",
+    "anthropic",
+    "google",
+    "google-vertex",
+    "google-vertex-anthropic",
+    "amazon-bedrock",
+    "bedrock",
+    "azure",
+    "azure-cognitive-services",
+    "github-copilot",
+    "github-models",
+    "xai",
+    "deepseek",
+    "zai",
+    "zai-coding-plan",
+    "moonshotai",
+    "minimax",
+    "alibaba",
+    "qwen",
+    "mistral",
+    "meta",
+    "nvidia",
+    "openrouter",
+    "vercel",
+    "huggingface",
+    "groq",
+    "togetherai",
+    "fireworks-ai",
+    "perplexity",
+}
 
 MODEL_REGEX = re.compile(
     r"""(?i)\b(
@@ -186,18 +218,23 @@ def send_telegram(text):
             print(f"[ERR] Telegram: {e}")
 
 
-def send_grouped(header, items, footer=""):
+def send_grouped(header, items, footer="", max_items=25):
     if not items:
         return
-    if len(items) == 1:
+    extra = 0
+    if len(items) > max_items:
+        extra = len(items) - max_items
+        items = items[:max_items]
+
+    if len(items) == 1 and extra == 0:
         msg = f"{header}\n{items[0]}" + (f"\n{footer}" if footer else "")
         send_telegram(msg)
         return
 
-    chunk = [f"{header} ({len(items)} yeni)"]
+    chunk = [f"{header} ({len(items) + extra} yeni)"]
     cur_len = len(chunk[0])
     for item in items:
-        if cur_len + len(item) + len(footer) + 10 > 3600:
+        if cur_len + len(item) + len(footer) + 40 > 3500:
             if footer:
                 chunk.append(footer)
             send_telegram("\n\n".join(chunk))
@@ -207,12 +244,22 @@ def send_grouped(header, items, footer=""):
         chunk.append(item)
         cur_len += len(item) + 2
 
+    if extra > 0:
+        chunk.append(f"...ve +{extra} ek model daha listelendi.")
     if footer:
         chunk.append(footer)
     send_telegram("\n\n".join(chunk))
 
 
-def add_known_aliases(known_set, raw_id):
+def norm_model_key(raw_id):
+    s = raw_id.lower().strip().split("/")[-1]
+    s = re.sub(r":(free|low-cost|web|eu|fast|highspeed|thinking|ultra)$", "", s)
+    s = re.sub(r"-(uncensored|abliterated|fast|highspeed|speed|flex|eu|fp8|nvfp4|turbo)$", "", s)
+    s = re.sub(r"(?<=\d)-(?=\d)", ".", s)
+    return s
+
+
+def add_known_aliases(known_set, norm_set, raw_id):
     s = raw_id.lower().strip()
     if len(s) < 4:
         return
@@ -225,6 +272,7 @@ def add_known_aliases(known_set, raw_id):
     for alias in (tail, no_colon, no_region, no_vendor, no_bedrock_ver):
         if len(alias) >= 4:
             known_set.add(alias)
+            norm_set.add(norm_model_key(alias))
 
 
 def is_known_token(tok, known_set):
@@ -262,11 +310,14 @@ def extract_new_models_from_files(files_list, known_set):
     return found
 
 
-def check_openrouter(state, known_set, groups):
+def check_openrouter(state, known_set, norm_set, groups):
     try:
         data = http_get_json("https://openrouter.ai/api/v1/models?output_modalities=all")
         models = data.get("data", [])
         seen = set(state.get("openrouter", []))
+        if seen and len(models) < len(seen) * 0.5:
+            print(f"[WARN] OpenRouter eksik yanit ({len(models)} < {len(seen)}), state korunuyor.")
+            return
         current = []
         hits = []
         for m in models:
@@ -274,7 +325,7 @@ def check_openrouter(state, known_set, groups):
             if not mid:
                 continue
             current.append(mid)
-            add_known_aliases(known_set, mid)
+            add_known_aliases(known_set, norm_set, mid)
             if mid not in seen and state["initialized"]:
                 ctx = m.get("context_length", "?")
                 mods = ", ".join(m.get("architecture", {}).get("output_modalities", []) or ["text"])
@@ -294,12 +345,14 @@ def check_openrouter(state, known_set, groups):
         print(f"[WARN] OpenRouter: {e}")
 
 
-def check_vercel_gateway(state, known_set, groups):
+def check_vercel_gateway(state, known_set, norm_set, groups):
     is_baseline = "vercel_gateway" not in state
     try:
         data = http_get_json("https://ai-gateway.vercel.sh/v1/models")
         models = data.get("data", [])
         seen = set(state.get("vercel_gateway", []))
+        if seen and len(models) < len(seen) * 0.5:
+            return False
         current = []
         hits = []
         for m in models:
@@ -307,7 +360,7 @@ def check_vercel_gateway(state, known_set, groups):
             if not mid:
                 continue
             current.append(mid)
-            add_known_aliases(known_set, mid)
+            add_known_aliases(known_set, norm_set, mid)
             if mid not in seen and state["initialized"] and not is_baseline:
                 mtype = m.get("type", "language")
                 name = m.get("name", mid)
@@ -321,7 +374,7 @@ def check_vercel_gateway(state, known_set, groups):
         return False
 
 
-def check_nvidia_catalog(state, known_set, groups):
+def check_nvidia_catalog(state, known_set, norm_set, groups):
     is_baseline = "nvidia_catalog" not in state
     try:
         data = http_get_json("https://assets.ngc.nvidia.com/products/api-catalog/featured-models.json")
@@ -341,7 +394,7 @@ def check_nvidia_catalog(state, known_set, groups):
             if not mid:
                 continue
             current.append(mid)
-            add_known_aliases(known_set, mid)
+            add_known_aliases(known_set, norm_set, mid)
             if mid not in seen and state["initialized"] and not is_baseline:
                 dname = item.get("name", mid)
                 hits.append(f"• {mid} ({dname})")
@@ -354,12 +407,12 @@ def check_nvidia_catalog(state, known_set, groups):
         return False
 
 
-def check_models_dev(state, known_set, groups):
+def check_models_dev(state, known_set, norm_set, groups):
     try:
         data = http_get_json("https://models.dev/api.json")
         seen = set(state.get("models_dev", []))
         current = []
-        hits = []
+        candidates = []
         for prov_id, prov_data in data.items():
             if not isinstance(prov_data, dict):
                 continue
@@ -369,33 +422,64 @@ def check_models_dev(state, known_set, groups):
             for mid, minfo in models.items():
                 full_id = f"{prov_id}/{mid}"
                 current.append(full_id)
-                add_known_aliases(known_set, full_id)
                 if full_id not in seen and state["initialized"]:
                     ctx = minfo.get("limit", {}).get("context", "?") if isinstance(minfo, dict) else "?"
-                    hits.append(f"• {full_id} (Ctx: {ctx})")
+                    candidates.append((prov_id.lower(), mid, full_id, ctx))
+
+        if seen and len(current) < len(seen) * 0.5:
+            print(f"[WARN] Models.dev eksik yanit ({len(current)} < {len(seen)}), state korunuyor.")
+            return
+
+        hits = []
+        seen_in_run = set()
+        for prov_low, mid, full_id, ctx in candidates:
+            nkey = norm_model_key(mid)
+            is_brand_new = nkey not in norm_set and nkey not in seen_in_run
+            is_first_party = prov_low in FIRST_PARTY_PROVIDERS
+            is_stealth = "stealth" in full_id.lower() or "alpha" in mid.lower()
+            if is_brand_new or is_first_party or is_stealth:
+                hits.append(f"• {full_id} (Ctx: {ctx})")
+                seen_in_run.add(nkey)
+            add_known_aliases(known_set, norm_set, full_id)
+
         state["models_dev"] = sorted(set(current))
         if hits:
-            groups.append(("🆕 Models.dev Katalog", hits, "https://models.dev"))
+            groups.append(("🆕 Models.dev Yeni Modeller", hits, "https://models.dev"))
     except Exception as e:
         print(f"[WARN] Models.dev: {e}")
 
 
-def check_litellm_json(state, known_set, groups):
+def check_litellm_json(state, known_set, norm_set, groups):
     try:
         url = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
         data = http_get_json(url)
         seen = set(state.get("litellm", []))
         current = []
-        hits = []
+        candidates = []
         for k, info in data.items():
             if k == "sample_spec":
                 continue
             current.append(k)
-            add_known_aliases(known_set, k)
             if k not in seen and state["initialized"]:
                 prov = info.get("litellm_provider", "?") if isinstance(info, dict) else "?"
                 max_tok = (info.get("max_input_tokens") or info.get("max_tokens", "?")) if isinstance(info, dict) else "?"
-                hits.append(f"• {k} ({prov} | max: {max_tok})")
+                candidates.append((k, str(prov).lower(), max_tok))
+
+        if seen and len(current) < len(seen) * 0.5:
+            print(f"[WARN] LiteLLM eksik yanit ({len(current)} < {len(seen)}), state korunuyor.")
+            return
+
+        hits = []
+        seen_in_run = set()
+        for k, prov_low, max_tok in candidates:
+            nkey = norm_model_key(k)
+            is_brand_new = nkey not in norm_set and nkey not in seen_in_run
+            is_first_party = prov_low in FIRST_PARTY_PROVIDERS
+            if is_brand_new or is_first_party:
+                hits.append(f"• {k} ({prov_low} | max: {max_tok})")
+                seen_in_run.add(nkey)
+            add_known_aliases(known_set, norm_set, k)
+
         state["litellm"] = sorted(set(current))
         if hits:
             groups.append((
@@ -506,7 +590,7 @@ def check_official_news(state, groups):
     return is_baseline
 
 
-def check_github(state, known_set, groups):
+def check_github(state, known_set, norm_set, groups):
     if not GITHUB_TOKEN:
         return False, False
     gh_headers = {
@@ -535,7 +619,7 @@ def check_github(state, known_set, groups):
 
                 if found:
                     for tok in found:
-                        known_set.add(tok)
+                        add_known_aliases(known_set, norm_set, tok)
                     lines_txt = "\n".join(
                         f"• {tok} ({fn}): {ln}" for tok, (fn, ln) in list(found.items())[:5]
                     )
@@ -582,9 +666,9 @@ def check_github(state, known_set, groups):
                     print(f"[WARN] GH PR files {pr_id}: {fe}")
 
                 for tok in text_hits:
-                    known_set.add(tok)
+                    add_known_aliases(known_set, norm_set, tok)
                 for tok in file_found:
-                    known_set.add(tok)
+                    add_known_aliases(known_set, norm_set, tok)
 
                 has_kw = any(k in title.lower() for k in ("stealth", "unreleased", "alpha model"))
                 if text_hits or file_found or has_kw:
@@ -633,9 +717,9 @@ def check_github(state, known_set, groups):
                 file_found = extract_new_models_from_files(detail.get("files", []), known_set)
 
                 for tok in msg_hits:
-                    known_set.add(tok)
+                    add_known_aliases(known_set, norm_set, tok)
                 for tok in file_found:
-                    known_set.add(tok)
+                    add_known_aliases(known_set, norm_set, tok)
 
                 is_prompt_leak_repo = "system_prompts_leaks" in repo
                 if msg_hits or file_found or is_prompt_leak_repo:
@@ -689,19 +773,20 @@ def check_github(state, known_set, groups):
 def main():
     state = load_state()
     known_set = set(state.get("known_model_strings", []))
+    norm_set = set()
     for existing in list(known_set):
-        add_known_aliases(known_set, existing)
+        add_known_aliases(known_set, norm_set, existing)
     groups = []
 
-    check_openrouter(state, known_set, groups)
-    b_vercel = check_vercel_gateway(state, known_set, groups)
-    b_nvidia = check_nvidia_catalog(state, known_set, groups)
-    check_models_dev(state, known_set, groups)
-    check_litellm_json(state, known_set, groups)
+    check_openrouter(state, known_set, norm_set, groups)
+    b_vercel = check_vercel_gateway(state, known_set, norm_set, groups)
+    b_nvidia = check_nvidia_catalog(state, known_set, norm_set, groups)
+    check_models_dev(state, known_set, norm_set, groups)
+    check_litellm_json(state, known_set, norm_set, groups)
     check_huggingface(state, groups)
     b_npm = check_npm_packages(state, groups)
     b_news = check_official_news(state, groups)
-    b_path, b_org = check_github(state, known_set, groups)
+    b_path, b_org = check_github(state, known_set, norm_set, groups)
 
     state["known_model_strings"] = sorted(known_set)
 
@@ -709,7 +794,7 @@ def main():
         state["initialized"] = True
         save_state(state)
         send_telegram(
-            f"✅ AI Model Tracker v3.1 Aktif ({datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')})\n"
+            f"✅ AI Model Tracker v3.2 Aktif ({datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')})\n"
             f"• Kayitli model izi: {len(known_set)}"
         )
         return
@@ -717,7 +802,7 @@ def main():
     save_state(state)
 
     if any([b_vercel, b_nvidia, b_npm, b_news, b_path, b_org]):
-        send_telegram("🚀 Tracker v3.1 Yukseltildi!")
+        send_telegram("🚀 Tracker v3.2 Yukseltildi!")
 
     for header, items, footer in groups:
         send_grouped(header, items, footer)
