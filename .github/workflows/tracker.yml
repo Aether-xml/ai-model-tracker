@@ -2,7 +2,6 @@ name: AI Model & Leak Tracker
 
 on:
   schedule:
-    # Sunucu yogunluguna takilmamak icin tekil dakikalarda 15 dk aralikla calisir
     - cron: "7,22,37,52 * * * *"
   workflow_dispatch:
 
@@ -30,9 +29,9 @@ jobs:
         run: |
           git config user.name "tracker-bot"
           git config user.email "actions@users.noreply.github.com"
-          if [ -n "$(git status --porcelain state.json)" ]; then
-            git add state.json
-            git commit -m "chore: update tracker state"
+          if [ -n "$(git status --porcelain state.json live_index.json)" ]; then
+            git add state.json live_index.json
+            git commit -m "chore: update tracker state and live index"
             git pull --rebase origin main || true
             git push
           else

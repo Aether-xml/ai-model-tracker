@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-AI Model & Leak Tracker v3.2
+AI Model & Leak Tracker v3.3
 OpenRouter (all modalities) + Vercel AI Gateway + Models.dev (deduped) + LiteLLM (deduped) +
 NVIDIA Catalog + HuggingFace + GitHub Commit/PR Diff + Path-Targeted Cloud SDKs +
-GitHub Org New Repos + Vertex/OpenAI/DeepMind/Anthropic News + NPM CLIs
+GitHub Org New Repos + Vertex/OpenAI/DeepMind/Anthropic News + NPM CLIs + live_index.json
 """
 import json
 import os
@@ -16,11 +16,12 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 
 STATE_FILE = os.environ.get("STATE_FILE", "state.json")
+LIVE_INDEX_FILE = os.environ.get("LIVE_INDEX_FILE", "live_index.json")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
-HEADERS_BASE = {"User-Agent": "AI-Model-Leak-Tracker/3.2"}
+HEADERS_BASE = {"User-Agent": "AI-Model-Leak-Tracker/3.3"}
 
 HF_ORGS = [
     "deepseek-ai",
@@ -109,7 +110,6 @@ FIRST_PARTY_PROVIDERS = {
     "azure",
     "azure-cognitive-services",
     "github-copilot",
-    "github-models",
     "xai",
     "deepseek",
     "zai",
@@ -128,6 +128,21 @@ FIRST_PARTY_PROVIDERS = {
     "togetherai",
     "fireworks-ai",
     "perplexity",
+    "opencode",
+    "cerebras",
+    "cloudflare-workers-ai",
+}
+
+FREE_INDEX_PROVIDERS = {
+    "opencode",
+    "openrouter",
+    "nvidia",
+    "google",
+    "groq",
+    "cerebras",
+    "mistral",
+    "cloudflare-workers-ai",
+    "cohere",
 }
 
 MODEL_REGEX = re.compile(
@@ -188,14 +203,41 @@ def load_state():
         "seen_commits": [],
         "seen_prs": [],
         "known_model_strings": [],
+        "recent_alerts": [],
     }
 
 
 def save_state(state):
     state["seen_commits"] = state["seen_commits"][-1200:]
     state["seen_prs"] = state["seen_prs"][-800:]
+    state["recent_alerts"] = state.get("recent_alerts", [])[-20:]
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
+
+
+def load_live_index():
+    if os.path.exists(LIVE_INDEX_FILE):
+        try:
+            with open(LIVE_INDEX_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {
+        "updated_at": "",
+        "free_openrouter": [],
+        "stealth_models": [],
+        "free_models_dev": [],
+        "vercel_models": [],
+        "recent_alerts": [],
+        "search_catalog": [],
+    }
+
+
+def save_live_index(live_idx):
+    live_idx["updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    live_idx["stealth_models"] = live_idx.get("stealth_models", [])[:50]
+    with open(LIVE_INDEX_FILE, "w", encoding="utf-8") as f:
+        json.dump(live_idx, f, ensure_ascii=False, separators=(",", ":"))
 
 
 def send_telegram(text):
@@ -310,7 +352,7 @@ def extract_new_models_from_files(files_list, known_set):
     return found
 
 
-def check_openrouter(state, known_set, norm_set, groups):
+def check_openrouter(state, known_set, norm_set, groups, live_idx):
     try:
         data = http_get_json("https://openrouter.ai/api/v1/models?output_modalities=all")
         models = data.get("data", [])
@@ -320,32 +362,40 @@ def check_openrouter(state, known_set, norm_set, groups):
             return
         current = []
         hits = []
+        free_or = []
+        stealth_or = []
         for m in models:
             mid = m.get("id", "")
             if not mid:
                 continue
             current.append(mid)
             add_known_aliases(known_set, norm_set, mid)
+            ctx = m.get("context_length", 0) or 0
+            mods = ", ".join(m.get("architecture", {}).get("output_modalities", []) or ["text"])
+            pricing = m.get("pricing", {}) or {}
+            is_zero_cost = (
+                ":free" in mid.lower()
+                or (str(pricing.get("prompt", "")) == "0" and str(pricing.get("completion", "")) == "0")
+            )
+            is_stealth = "alpha" in mid.lower() or "stealth" in mid.lower()
+            if is_stealth:
+                stealth_or.append({"id": mid, "ctx": ctx, "mods": mods, "src": "OpenRouter"})
+            if is_zero_cost:
+                free_or.append({"id": mid, "ctx": ctx, "mods": mods})
             if mid not in seen and state["initialized"]:
-                ctx = m.get("context_length", "?")
-                mods = ", ".join(m.get("architecture", {}).get("output_modalities", []) or ["text"])
-                pricing = m.get("pricing", {}) or {}
-                is_stealth = (
-                    "alpha" in mid.lower()
-                    or "stealth" in mid.lower()
-                    or ":free" in mid.lower()
-                    or (str(pricing.get("prompt", "")) == "0" and str(pricing.get("completion", "")) == "0")
-                )
-                badge = "🚨 STEALTH/UCRETSIZ" if is_stealth else "🆕"
+                badge = "🚨 STEALTH/UCRETSIZ" if (is_stealth or is_zero_cost) else "🆕"
                 hits.append(f"{badge} {mid}\nModalite: {mods} | Ctx: {ctx}\nhttps://openrouter.ai/{mid}")
+
         state["openrouter"] = sorted(set(current))
+        live_idx["free_openrouter"] = free_or[:80]
+        live_idx["stealth_models"] = stealth_or[:40]
         if hits:
             groups.append(("🌐 OpenRouter Yeni Modeller", hits, ""))
     except Exception as e:
         print(f"[WARN] OpenRouter: {e}")
 
 
-def check_vercel_gateway(state, known_set, norm_set, groups):
+def check_vercel_gateway(state, known_set, norm_set, groups, live_idx):
     is_baseline = "vercel_gateway" not in state
     try:
         data = http_get_json("https://ai-gateway.vercel.sh/v1/models")
@@ -355,17 +405,20 @@ def check_vercel_gateway(state, known_set, norm_set, groups):
             return False
         current = []
         hits = []
+        vercel_list = []
         for m in models:
             mid = m.get("id", "")
             if not mid:
                 continue
             current.append(mid)
             add_known_aliases(known_set, norm_set, mid)
+            mtype = m.get("type", "language")
+            vercel_list.append({"id": mid, "type": mtype})
             if mid not in seen and state["initialized"] and not is_baseline:
-                mtype = m.get("type", "language")
                 name = m.get("name", mid)
                 hits.append(f"• {mid} ({name} | {mtype})")
         state["vercel_gateway"] = sorted(set(current))
+        live_idx["vercel_models"] = vercel_list[:150]
         if hits:
             groups.append(("▲ Vercel AI Gateway Yeni Modeller", hits, "https://vercel.com/ai-gateway/models"))
         return is_baseline
@@ -407,24 +460,47 @@ def check_nvidia_catalog(state, known_set, norm_set, groups):
         return False
 
 
-def check_models_dev(state, known_set, norm_set, groups):
+def check_models_dev(state, known_set, norm_set, groups, live_idx):
     try:
         data = http_get_json("https://models.dev/api.json")
         seen = set(state.get("models_dev", []))
         current = []
         candidates = []
+        free_mdev = []
+        search_items = []
+
         for prov_id, prov_data in data.items():
             if not isinstance(prov_data, dict):
                 continue
             models = prov_data.get("models", {})
             if not isinstance(models, dict):
                 continue
+            prov_low = prov_id.lower()
             for mid, minfo in models.items():
                 full_id = f"{prov_id}/{mid}"
                 current.append(full_id)
+                ctx = minfo.get("limit", {}).get("context", 0) if isinstance(minfo, dict) else 0
+                status = minfo.get("status", "active") if isinstance(minfo, dict) else "active"
+                cost = minfo.get("cost", {}) if isinstance(minfo, dict) else {}
+                in_cost = cost.get("input") if isinstance(cost, dict) else None
+                out_cost = cost.get("output") if isinstance(cost, dict) else None
+                is_free = (
+                    status != "deprecated"
+                    and (
+                        "-free" in mid.lower()
+                        or ":free" in mid.lower()
+                        or (in_cost == 0 and out_cost == 0)
+                    )
+                )
+                if is_free and (prov_low in FREE_INDEX_PROVIDERS or "stealth" in full_id.lower()):
+                    free_mdev.append({"id": full_id, "prov": prov_id, "ctx": ctx or 0})
+                if "stealth" in full_id.lower() and status != "deprecated":
+                    live_idx["stealth_models"].append({"id": full_id, "ctx": ctx or 0, "mods": "?", "src": "Models.dev"})
+                if prov_low in FIRST_PARTY_PROVIDERS and status != "deprecated":
+                    search_items.append({"id": full_id, "ctx": ctx or 0, "free": bool(is_free)})
+
                 if full_id not in seen and state["initialized"]:
-                    ctx = minfo.get("limit", {}).get("context", "?") if isinstance(minfo, dict) else "?"
-                    candidates.append((prov_id.lower(), mid, full_id, ctx))
+                    candidates.append((prov_low, mid, full_id, ctx or "?"))
 
         if seen and len(current) < len(seen) * 0.5:
             print(f"[WARN] Models.dev eksik yanit ({len(current)} < {len(seen)}), state korunuyor.")
@@ -443,6 +519,8 @@ def check_models_dev(state, known_set, norm_set, groups):
             add_known_aliases(known_set, norm_set, full_id)
 
         state["models_dev"] = sorted(set(current))
+        live_idx["free_models_dev"] = free_mdev[:100]
+        live_idx["search_catalog"] = search_items[:800]
         if hits:
             groups.append(("🆕 Models.dev Yeni Modeller", hits, "https://models.dev"))
     except Exception as e:
@@ -772,16 +850,18 @@ def check_github(state, known_set, norm_set, groups):
 
 def main():
     state = load_state()
+    live_idx = load_live_index()
+    live_idx["stealth_models"] = []
     known_set = set(state.get("known_model_strings", []))
     norm_set = set()
     for existing in list(known_set):
         add_known_aliases(known_set, norm_set, existing)
     groups = []
 
-    check_openrouter(state, known_set, norm_set, groups)
-    b_vercel = check_vercel_gateway(state, known_set, norm_set, groups)
+    check_openrouter(state, known_set, norm_set, groups, live_idx)
+    b_vercel = check_vercel_gateway(state, known_set, norm_set, groups, live_idx)
     b_nvidia = check_nvidia_catalog(state, known_set, norm_set, groups)
-    check_models_dev(state, known_set, norm_set, groups)
+    check_models_dev(state, known_set, norm_set, groups, live_idx)
     check_litellm_json(state, known_set, norm_set, groups)
     check_huggingface(state, groups)
     b_npm = check_npm_packages(state, groups)
@@ -790,19 +870,40 @@ def main():
 
     state["known_model_strings"] = sorted(known_set)
 
+    recent = list(state.get("recent_alerts", []))
+    now_str = datetime.now(timezone.utc).strftime("%m-%d %H:%M")
+    for header, items, footer in groups:
+        first_line = items[0].splitlines()[0][:110] if items else ""
+        recent.append({
+            "t": now_str,
+            "h": header,
+            "s": first_line + (f" (+{len(items) - 1})" if len(items) > 1 else ""),
+            "u": footer or "",
+        })
+    state["recent_alerts"] = recent[-15:]
+    live_idx["recent_alerts"] = state["recent_alerts"]
+
+    save_live_index(live_idx)
+
+    is_index_first = "live_index_ready" not in state
+    state["live_index_ready"] = True
+
     if not state["initialized"]:
         state["initialized"] = True
         save_state(state)
         send_telegram(
-            f"✅ AI Model Tracker v3.2 Aktif ({datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')})\n"
+            f"✅ AI Model Tracker v3.3 Aktif ({datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')})\n"
             f"• Kayitli model izi: {len(known_set)}"
         )
         return
 
     save_state(state)
 
-    if any([b_vercel, b_nvidia, b_npm, b_news, b_path, b_org]):
-        send_telegram("🚀 Tracker v3.2 Yukseltildi!")
+    if is_index_first or any([b_vercel, b_nvidia, b_npm, b_news, b_path, b_org]):
+        send_telegram(
+            "⚡ Tracker v3.3 Hazır: live_index.json oluşturuldu! "
+            "Artık /free, /stealth, /siteler ve /ara komutları için Cloudflare Worker adımına geçebiliriz."
+        )
 
     for header, items, footer in groups:
         send_grouped(header, items, footer)
